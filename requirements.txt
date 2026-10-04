@@ -4,3 +4,6 @@ google-api-python-client
 beautifulsoup4
 python-dotenv
 groq
+google-genai
+pypdf
+supabase

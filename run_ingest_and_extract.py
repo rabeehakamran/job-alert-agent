@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from gmail_ingest.fetch import fetch_job_emails
-from extraction.extract import extract_jobs
+from extraction.extract import extract_jobs_from_email
 
 
 def main():
@@ -25,11 +25,7 @@ def main():
     total_jobs = 0
     for email in emails:
         print(f"--- {email['subject']} (from {email['sender']}) ---")
-        try:
-            jobs = extract_jobs(email["text"], sender=email["sender"])
-        except ValueError as e:
-            print(f"  [extraction failed: {e}]\n")
-            continue
+        jobs = extract_jobs_from_email(email["text"], sender=email["sender"])
 
         if not jobs:
             print("  No job listings found in this email.\n")

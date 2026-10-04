@@ -17,7 +17,7 @@ comfortably covers a personal inbox's volume.
 import json
 import os
 
-from groq import Groq
+from groq import Groq, BadRequestError
 
 MODEL = "openai/gpt-oss-20b"
 
@@ -74,18 +74,71 @@ def extract_jobs(email_text: str, sender: str, client: Groq = None, max_retries:
                 ],
                 response_format={"type": "json_object"},
                 temperature=0,
+                max_tokens=4096,  # chunks can contain 5-6+ jobs -- without an
+                                   # explicit limit, long JSON output was
+                                   # getting cut off mid-generation, which
+                                   # Groq's json_object mode then rejects as
+                                   # invalid rather than returning truncated
+                                   # JSON for us to handle.
             )
             content = response.choices[0].message.content
             parsed = json.loads(content)
             return parsed.get("jobs", [])
 
-        except (json.JSONDecodeError, KeyError) as e:
+        except (json.JSONDecodeError, KeyError, BadRequestError) as e:
+            # BadRequestError covers Groq's own json_validate_failed cases --
+            # the model's output failed their JSON-mode schema check before
+            # it ever reached us. Retrying with the same prompt often
+            # succeeds since generation isn't fully deterministic even at
+            # temperature=0.
             last_error = e
             continue
 
     # Both attempts failed to produce valid JSON -- fail loudly rather than
     # silently dropping emails. Caller decides whether to log and skip.
     raise ValueError(f"Extraction failed after {max_retries} attempts: {last_error}")
+
+
+CHUNK_SIZE_CHARS = 6000  # keeps individual chunks well within what the model
+                          # reliably handles -- long digest emails (15+ bundled
+                          # jobs) were causing Groq's JSON-mode validator to
+                          # fail consistently, even on retry, at full length.
+CHUNK_OVERLAP_CHARS = 300  # avoids slicing a job entry in half at a chunk boundary
+
+
+def chunk_email_text(text: str, chunk_size: int = CHUNK_SIZE_CHARS, overlap: int = CHUNK_OVERLAP_CHARS) -> list[str]:
+    if len(text) <= chunk_size:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start = end - overlap
+    return chunks
+
+
+def extract_jobs_from_email(email_text: str, sender: str, client: Groq = None) -> list[dict]:
+    """Extracts jobs from a full email, chunking first if it's long.
+
+    Overlapping chunks can occasionally extract the same job twice -- that's
+    fine, it's caught downstream by the dedup_hash unique constraint when
+    saving to Supabase, so no dedup logic is needed here.
+    """
+    client = client or _get_client()
+    chunks = chunk_email_text(email_text)
+
+    all_jobs = []
+    for i, chunk in enumerate(chunks):
+        try:
+            jobs = extract_jobs(chunk, sender=sender, client=client)
+            all_jobs.extend(jobs)
+        except ValueError as e:
+            print(f"  [chunk {i+1}/{len(chunks)} extraction failed, skipping: {e}]")
+            continue
+
+    return all_jobs
 
 
 if __name__ == "__main__":
